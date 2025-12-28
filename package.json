@@ -1,0 +1,19 @@
+{
+  "name": "voice-ai-twilio-fly",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Production-ready Twilio Media Streams <-> OpenAI Realtime Voice bridge for Fly.io",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@fastify/formbody": "^8.0.0",
+    "@fastify/websocket": "^10.0.0",
+    "dotenv": "^16.4.5",
+    "fastify": "^4.28.1",
+    "ws": "^8.18.0"
+  }
+}
