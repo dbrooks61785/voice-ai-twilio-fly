@@ -1,7 +1,7 @@
 import "dotenv/config";
 import Fastify from 'fastify';
-import formbody from 'fastify/formbody';
-import websocket from 'fastify/websocket';
+import formbody from '@fastify/formbody';
+import websocket from '@fastify/websocket';
 import WebSocket from 'ws';
 
 const app = Fastify({
