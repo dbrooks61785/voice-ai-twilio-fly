@@ -11,9 +11,9 @@ app.register(formbody);
 app.register(websocket);
 
 const PORT = Number(process.env.PORT || 8080);
-const VOICE = process.env.VOICE || 'alloy';
+const VOICE = process.env.VOICE || 'ash';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || 'gpt-4o-realtime-preview';
+const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime';
 const GHL_PIT_TOKEN = process.env.GHL_PIT_TOKEN || '';
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || '';
 const WEBHOOK_NEW_ORDER = process.env.WEBHOOK_NEW_ORDER || '';
