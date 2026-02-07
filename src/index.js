@@ -15,6 +15,7 @@ const PORT = Number(process.env.PORT || 8080);
 const VOICE = process.env.VOICE || 'ember';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime';
+const OPENAI_TRANSLATE_MODEL = process.env.OPENAI_TRANSLATE_MODEL || 'gpt-4o-mini';
 const GHL_PIT_TOKEN = process.env.GHL_PIT_TOKEN || '';
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || '';
 const WEBHOOK_NEW_ORDER = process.env.WEBHOOK_NEW_ORDER || '';
@@ -29,6 +30,81 @@ function requireEnv(value, name) {
 requireEnv(OPENAI_API_KEY, 'OPENAI_API_KEY');
 requireEnv(WEBHOOK_NEW_ORDER, 'WEBHOOK_NEW_ORDER');
 requireEnv(WEBHOOK_EXISTING_UPDATE, 'WEBHOOK_EXISTING_UPDATE');
+
+function extractJsonObject(text) {
+  if (!text) return null;
+  const stripped = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/i, '');
+  const start = stripped.indexOf('{');
+  const end = stripped.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) {
+    return null;
+  }
+  try {
+    return JSON.parse(stripped.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+async function translatePayloadToEnglish(payload, log) {
+  try {
+    const prompt = [
+      'Translate all string values in the JSON object to English.',
+      'Preserve keys and structure; do not add or remove fields.',
+      'Do not translate names, company names, emails, phone numbers, or IDs.',
+      'If a value is already English, keep it unchanged.',
+      'Return JSON only.'
+    ].join(' ');
+
+    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: OPENAI_TRANSLATE_MODEL,
+        temperature: 0,
+        messages: [
+          { role: 'system', content: 'You translate JSON values precisely.' },
+          { role: 'user', content: `${prompt}\nJSON:\n${JSON.stringify(payload)}` }
+        ]
+      })
+    });
+
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      log.warn({ status: resp.status, body }, 'Translation request failed');
+      return null;
+    }
+
+    const data = await resp.json();
+    const content = data?.choices?.[0]?.message?.content;
+    return extractJsonObject(content);
+  } catch (err) {
+    log.warn({ err }, 'Translation request error');
+    return null;
+  }
+}
+
+async function translateFieldsToEnglish(payload, fields, log) {
+  const subset = {};
+  for (const field of fields) {
+    if (typeof payload[field] === 'string' && payload[field].trim() !== '') {
+      subset[field] = payload[field];
+    }
+  }
+  if (Object.keys(subset).length === 0) {
+    return payload;
+  }
+
+  const translated = await translatePayloadToEnglish(subset, log);
+  if (!translated || typeof translated !== 'object') {
+    return payload;
+  }
+
+  return { ...payload, ...translated };
+}
 
 function validateTwilio(req) {
   if (!TWILIO_ACCOUNT_SID) return true;
@@ -240,10 +316,15 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
             args.email = args.email || contact.email;
             args.phone = args.phone || callerPhone;
           }
+          const translatedArgs = await translateFieldsToEnglish(
+            args,
+            ['job_city', 'job_state', 'how_can_we_help_you'],
+            log
+          );
           await fetch(WEBHOOK_NEW_ORDER, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(args)
+            body: JSON.stringify(translatedArgs)
           });
           openaiWs.send(JSON.stringify({
             type: 'conversation.item.create',
@@ -264,10 +345,11 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
             payload.caller_name = payload.caller_name || contact.firstName;
             payload.phone = payload.phone || callerPhone;
           }
+          const translatedPayload = await translateFieldsToEnglish(payload, ['call_notes'], log);
           await fetch(WEBHOOK_EXISTING_UPDATE, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(translatedPayload)
           });
           openaiWs.send(JSON.stringify({
             type: 'conversation.item.create',
