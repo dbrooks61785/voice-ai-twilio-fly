@@ -139,6 +139,10 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
         - Name: ${info.firstName}
         - Active Load: ${info.load_number}
         - Active Reservation: ${info.reservation_number}
+        LANGUAGE:
+        - Detect the caller's language from their first response.
+        - If not English, continue the conversation in that language.
+        - If the language is unclear or mixed, ask which language they prefer.
         FLOW:
         1. Wait for "Existing" or "New".
         2. EXISTING: Confirm the "Load Number" OR "Reservation Number".
@@ -151,6 +155,8 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
       initialGreeting = 'EZ Lumper Services. Mike speaking. How can I help you?';
       systemInstructions = `
         You are "EZ Lumper Services." Start by saying: "${initialGreeting}"
+        LANGUAGE: Detect the caller's language. If not English, continue in that language.
+        If the language is unclear or mixed, ask which language they prefer.
         INTAKE (Ask one by one): First Name, Company, Email, Location (City/State), Dock Available, Phone.
         VERIFY: Read back Name, Email, Phone (Spell out A-B-C).
         SUBMIT: Use tool "submit_new_intake".
