@@ -4,6 +4,7 @@ import formbody from '@fastify/formbody';
 import websocket from '@fastify/websocket';
 import WebSocket from 'ws';
 import { twimlConnectStream } from './twiml.js';
+import { sanitizePayload } from './sanitize.js';
 
 const app = Fastify({
   logger: { level: process.env.LOG_LEVEL || 'info' }
@@ -90,7 +91,11 @@ async function translatePayloadToEnglish(payload, log) {
 async function translateFieldsToEnglish(payload, fields, log) {
   const subset = {};
   for (const field of fields) {
-    if (typeof payload[field] === 'string' && payload[field].trim() !== '') {
+    if (
+      typeof payload[field] === 'string'
+      && payload[field].trim() !== ''
+      && !payload[field].includes('[REDACTED]')
+    ) {
       subset[field] = payload[field];
     }
   }
@@ -323,8 +328,9 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
             args.email = args.email || contact.email;
             args.phone = args.phone || callerPhone;
           }
+          const sanitizedArgs = sanitizePayload(args, log);
           const translatedArgs = await translateFieldsToEnglish(
-            args,
+            sanitizedArgs,
             ['job_city', 'job_state', 'how_can_we_help_you'],
             log
           );
@@ -352,7 +358,8 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
             payload.caller_name = payload.caller_name || contact.firstName;
             payload.phone = payload.phone || callerPhone;
           }
-          const translatedPayload = await translateFieldsToEnglish(payload, ['call_notes'], log);
+          const sanitizedPayload = sanitizePayload(payload, log);
+          const translatedPayload = await translateFieldsToEnglish(sanitizedPayload, ['call_notes'], log);
           await fetch(WEBHOOK_EXISTING_UPDATE, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

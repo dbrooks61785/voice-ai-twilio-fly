@@ -1,3 +1,5 @@
+import { sanitizePayload } from "./sanitize.js";
+
 export const tools = [
   {
     type: "function",
@@ -22,14 +24,16 @@ export const tools = [
 
 // This executes tools when OpenAI requests them.
 // Replace with real API calls (GHL, your DB, etc).
+
 export async function runToolCall(name, args) {
   if (name === "create_intake_record") {
+    const sanitizedArgs = sanitizePayload(args);
     // TODO: persist to GHL/DB
     // Keep it deterministic + idempotent in production.
     return {
       ok: true,
       message: "Intake captured.",
-      captured: args
+      captured: sanitizedArgs
     };
   }
 
