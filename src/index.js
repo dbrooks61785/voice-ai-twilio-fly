@@ -1,9 +1,13 @@
 import "dotenv/config";
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import Fastify from 'fastify';
 import formbody from '@fastify/formbody';
 import websocket from '@fastify/websocket';
 import WebSocket from 'ws';
+import { validateRequest } from 'twilio';
 import { twimlConnectStream } from './twiml.js';
+import { ingestKb, loadKbIndex, searchKb } from './kb.js';
 
 const app = Fastify({
   logger: { level: process.env.LOG_LEVEL || 'info' }
@@ -16,10 +20,24 @@ const VOICE = process.env.VOICE || 'ember';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime';
 const OPENAI_TRANSLATE_MODEL = process.env.OPENAI_TRANSLATE_MODEL || 'gpt-4o-mini';
+const OPENAI_EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small';
+const KB_INDEX_PATH = process.env.KB_INDEX_PATH || './data/kb_index.json';
+const KB_REFRESH_ON_START = process.env.KB_REFRESH_ON_START === 'true';
+const KB_MAX_PAGES = Number.isFinite(Number(process.env.KB_MAX_PAGES)) ? Number(process.env.KB_MAX_PAGES) : 80;
+const KB_MIN_CHARS = Number.isFinite(Number(process.env.KB_MIN_CHARS)) ? Number(process.env.KB_MIN_CHARS) : 300;
+const KB_CHUNK_SIZE = Number.isFinite(Number(process.env.KB_CHUNK_SIZE)) ? Number(process.env.KB_CHUNK_SIZE) : 1200;
+const KB_CHUNK_OVERLAP = Number.isFinite(Number(process.env.KB_CHUNK_OVERLAP)) ? Number(process.env.KB_CHUNK_OVERLAP) : 200;
+const KB_EZ_BASE_URL = process.env.KB_EZ_BASE_URL || 'https://ezlumperservices.com/';
+const KB_HAULPASS_HOME = process.env.KB_HAULPASS_HOME || 'https://haulpass.ezlumperservices.com/';
+const UNKNOWN_QUESTION_LOG_PATH = process.env.UNKNOWN_QUESTION_LOG_PATH || './data/unknown_questions.log';
 const GHL_PIT_TOKEN = process.env.GHL_PIT_TOKEN || '';
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || '';
 const WEBHOOK_NEW_ORDER = process.env.WEBHOOK_NEW_ORDER || '';
 const WEBHOOK_EXISTING_UPDATE = process.env.WEBHOOK_EXISTING_UPDATE || '';
+const WEBHOOK_CALLBACK_REQUEST = process.env.WEBHOOK_CALLBACK_REQUEST || '';
+const WEBHOOK_TRANSFER_REQUEST = process.env.WEBHOOK_TRANSFER_REQUEST || '';
+const WEBHOOK_UNKNOWN_QUESTION = process.env.WEBHOOK_UNKNOWN_QUESTION || '';
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || '';
 
 function requireEnv(value, name) {
@@ -30,6 +48,7 @@ function requireEnv(value, name) {
 requireEnv(OPENAI_API_KEY, 'OPENAI_API_KEY');
 requireEnv(WEBHOOK_NEW_ORDER, 'WEBHOOK_NEW_ORDER');
 requireEnv(WEBHOOK_EXISTING_UPDATE, 'WEBHOOK_EXISTING_UPDATE');
+requireEnv(TWILIO_AUTH_TOKEN, 'TWILIO_AUTH_TOKEN');
 
 function extractJsonObject(text) {
   if (!text) return null;
@@ -106,15 +125,100 @@ async function translateFieldsToEnglish(payload, fields, log) {
   return { ...payload, ...translated };
 }
 
-function validateTwilio(req) {
-  if (!TWILIO_ACCOUNT_SID) return true;
-  const accountSid = req.headers['x-twilio-accountsid'];
-  if (accountSid && accountSid === TWILIO_ACCOUNT_SID) {
-    return true;
-  }
-  req.log.warn({ accountSid }, 'Unauthorized Twilio account');
-  return false;
+let kbIndex = null;
+
+function buildRequestUrl(req) {
+  const base = (process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.headers.host}`).replace(/\/$/, '');
+  return `${base}${req.raw.url}`;
 }
+
+function validateTwilio(req) {
+  const accountSid = req.headers['x-twilio-accountsid'];
+  if (TWILIO_ACCOUNT_SID && accountSid !== TWILIO_ACCOUNT_SID) {
+    req.log.warn({ accountSid }, 'Unauthorized Twilio account');
+    return false;
+  }
+
+  const signature = req.headers['x-twilio-signature'];
+  if (!signature) {
+    req.log.warn('Missing Twilio signature');
+    return false;
+  }
+
+  const params = req.method === 'POST' ? (req.body || {}) : (req.query || {});
+  const url = buildRequestUrl(req);
+  const isValid = validateRequest(TWILIO_AUTH_TOKEN, signature, url, params);
+  if (!isValid) {
+    req.log.warn({ url }, 'Invalid Twilio signature');
+    return false;
+  }
+
+  return true;
+}
+
+async function initKb(log) {
+  kbIndex = await loadKbIndex(KB_INDEX_PATH, log);
+
+  if (KB_REFRESH_ON_START || !kbIndex) {
+    ingestKb({
+      apiKey: OPENAI_API_KEY,
+      embeddingModel: OPENAI_EMBEDDING_MODEL,
+      indexPath: KB_INDEX_PATH,
+      maxPages: KB_MAX_PAGES,
+      minChars: KB_MIN_CHARS,
+      chunkSize: KB_CHUNK_SIZE,
+      chunkOverlap: KB_CHUNK_OVERLAP,
+      ezBaseUrl: KB_EZ_BASE_URL,
+      haulpassHome: KB_HAULPASS_HOME,
+      log
+    })
+      .then((index) => {
+        kbIndex = index;
+      })
+      .catch((err) => log.error({ err }, 'KB refresh failed'));
+  }
+}
+
+async function postWebhook(url, payload, log, label) {
+  if (!url) {
+    log?.info({ label }, 'Webhook not configured');
+    return { ok: false, skipped: true };
+  }
+
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      log?.warn({ label, status: resp.status, body }, 'Webhook request failed');
+      return { ok: false, status: resp.status };
+    }
+    return { ok: true, status: resp.status };
+  } catch (err) {
+    log?.warn({ label, err }, 'Webhook request error');
+    return { ok: false, error: err?.message || 'error' };
+  }
+}
+
+async function appendJsonLine(filePath, entry) {
+  const resolved = path.resolve(filePath);
+  await fs.mkdir(path.dirname(resolved), { recursive: true });
+  await fs.appendFile(resolved, `${JSON.stringify(entry)}\n`, 'utf-8');
+}
+
+async function logUnknownQuestion(entry, log) {
+  const payload = {
+    ...entry,
+    timestamp: new Date().toISOString()
+  };
+  await appendJsonLine(UNKNOWN_QUESTION_LOG_PATH, payload);
+  await postWebhook(WEBHOOK_UNKNOWN_QUESTION, payload, log, 'unknown_question');
+}
+
+await initKb(app.log);
 
 async function lookupContact(phoneNumber) {
   if (!phoneNumber || phoneNumber === 'Unknown' || !GHL_PIT_TOKEN || !GHL_LOCATION_ID) {
@@ -146,6 +250,7 @@ async function lookupContact(phoneNumber) {
 
   let loadNumber = 'Unknown';
   let reservationNumber = 'Unknown';
+  let jobCity = 'Unknown';
   if (Array.isArray(result.customFields)) {
     for (const f of result.customFields) {
       const name = (f.name || '').toLowerCase();
@@ -154,6 +259,9 @@ async function lookupContact(phoneNumber) {
       }
       if (f.value && name.includes('reservation')) {
         reservationNumber = f.value;
+      }
+      if (f.value && (name.includes('job city') || name.includes('job_city') || name.includes('jobcity'))) {
+        jobCity = f.value;
       }
     }
   }
@@ -164,7 +272,8 @@ async function lookupContact(phoneNumber) {
     company: result.companyName || 'your company',
     email: result.email || '',
     load_number: loadNumber,
-    reservation_number: reservationNumber
+    reservation_number: reservationNumber,
+    job_city: jobCity
   };
 }
 
@@ -204,6 +313,28 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
     }
   }
 
+  function sendToolOutput(callId, output) {
+    openaiWs.send(JSON.stringify({
+      type: 'conversation.item.create',
+      item: {
+        type: 'function_call_output',
+        call_id: callId,
+        output: JSON.stringify(output)
+      }
+    }));
+  }
+
+  function requestFollowup(instructions) {
+    if (!instructions) {
+      openaiWs.send(JSON.stringify({ type: 'response.create' }));
+      return;
+    }
+    openaiWs.send(JSON.stringify({
+      type: 'response.create',
+      response: { instructions }
+    }));
+  }
+
   function sendSessionConfig(info) {
     let initialGreeting;
     let systemInstructions;
@@ -215,19 +346,40 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
         - Name: ${info.firstName}
         - Active Load: ${info.load_number}
         - Active Reservation: ${info.reservation_number}
+        - Job City on file: ${info.job_city}
+        KNOWLEDGE BASE:
+        - Use kb_search for questions about services, coverage, hours, pricing, billing, HaulPass, and policies.
+        - Scope: ezlumperservices.com and all linked pages; haulpass.ezlumperservices.com home page only.
+        FAQ SUMMARY:
+        - On-demand labor with same-day availability is emphasized.
+        - Assume callers already know what a lumper is unless they ask.
+        - Quotes are sent by email after intake; pricing uses structured tiers.
+        - Travel charges are determined by distance from the nearest dispatch zone.
+        - We accept credit cards and provide invoices and receipts.
+        - Office hours are listed in the knowledge base; after-hours, offer a callback next business day.
+        - If asked "Where is dispatch?" or "Can I get ETA/confirmation?", say dispatch will call back with an update; use request_callback.
+        - If asked to modify or cancel, use transfer_to_agent.
+        - If asked about insurance, safety, compliance, or certifications, use transfer_to_agent for a callback.
+        - HaulPass login requires a member number. If they do not have one, they can sign the company up; plan info is on haulpass site.
+          If login issues persist, they should check with their company for the member number; if the number is correct, the account may be inactive.
+        - If confirmation email is missing: ask for reservation name and company name, confirm job city on file (${info.job_city}),
+          then confirm the correct email spelling and report_existing_issue to update and resend the confirmation email.
         LANGUAGE:
         - Detect the caller's language from their first response.
         - If not English, continue the conversation in that language.
         - If the language is unclear or mixed, ask which language they prefer.
         - When calling tools, translate all fields to English.
-        KNOWLEDGE BASE:
-        - You can rely on ezlumperservices.com and all pages linked from that site.
-        - You can rely on the haulpass.ezlumperservices.com home page only.
         SAFETY:
         - Only discuss info from the knowledge base or this caller's account.
         - Never reveal internal processes, internal tools, policies, or business secrets.
         - Never read back or repeat sensitive data (passwords, credit cards, SSNs, tokens).
         - If sensitive data is provided, acknowledge and ask them not to share it; if confirmation is needed, use masking (e.g., last 4 digits).
+        - Never mention tool names or internal systems to the caller.
+        CALLBACKS:
+        - If you cannot answer from the knowledge base or caller account, log_unknown_question and request_callback.
+        - Always offer a callback when you cannot answer.
+        - If kb_search returns no results, log_unknown_question and request_callback.
+        - If kb_search reports kb_not_ready, apologize and request_callback.
         FLOW:
         1. Wait for "Existing" or "New".
         2. EXISTING: Confirm the "Load Number" OR "Reservation Number".
@@ -240,14 +392,38 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
       initialGreeting = 'EZ Lumper Services. Mike speaking. How can I help you?';
       systemInstructions = `
         You are "EZ Lumper Services." Start by saying: "${initialGreeting}"
-        LANGUAGE: Detect the caller's language. If not English, continue in that language.
-        If the language is unclear or mixed, ask which language they prefer.
-        Always submit tool fields in English, translating caller responses as needed.
-        KNOWLEDGE BASE: ezlumperservices.com and all linked pages; haulpass.ezlumperservices.com home page only.
-        SAFETY: Only discuss info from the knowledge base or this caller's account.
-        Never reveal internal processes, internal tools, policies, or business secrets.
-        Never read back or repeat sensitive data (passwords, credit cards, SSNs, tokens).
-        If sensitive data is provided, acknowledge and ask them not to share it; if confirmation is needed, use masking (e.g., last 4 digits).
+        KNOWLEDGE BASE:
+        - Use kb_search for questions about services, coverage, hours, pricing, billing, HaulPass, and policies.
+        - Scope: ezlumperservices.com and all linked pages; haulpass.ezlumperservices.com home page only.
+        FAQ SUMMARY:
+        - On-demand labor with same-day availability is emphasized.
+        - Assume callers already know what a lumper is unless they ask.
+        - Quotes are sent by email after intake; pricing uses structured tiers.
+        - Travel charges are determined by distance from the nearest dispatch zone.
+        - We accept credit cards and provide invoices and receipts.
+        - Office hours are listed in the knowledge base; after-hours, offer a callback next business day.
+        - If asked "Where is dispatch?" or "Can I get ETA/confirmation?", say dispatch will call back with an update; use request_callback.
+        - If asked to modify or cancel, use transfer_to_agent.
+        - If asked about insurance, safety, compliance, or certifications, use transfer_to_agent for a callback.
+        - HaulPass login requires a member number. If they do not have one, they can sign the company up; plan info is on haulpass site.
+          If login issues persist, they should check with their company for the member number; if the number is correct, the account may be inactive.
+        - If confirmation email is missing: ask for reservation name and company name, confirm job city on file,
+          then confirm the correct email spelling and report_existing_issue to update and resend the confirmation email.
+        LANGUAGE:
+        - Detect the caller's language. If not English, continue in that language.
+        - If the language is unclear or mixed, ask which language they prefer.
+        - Always submit tool fields in English, translating caller responses as needed.
+        SAFETY:
+        - Only discuss info from the knowledge base or this caller's account.
+        - Never reveal internal processes, internal tools, policies, or business secrets.
+        - Never read back or repeat sensitive data (passwords, credit cards, SSNs, tokens).
+        - If sensitive data is provided, acknowledge and ask them not to share it; if confirmation is needed, use masking (e.g., last 4 digits).
+        - Never mention tool names or internal systems to the caller.
+        CALLBACKS:
+        - If you cannot answer from the knowledge base or caller account, log_unknown_question and request_callback.
+        - Always offer a callback when you cannot answer.
+        - If kb_search returns no results, log_unknown_question and request_callback.
+        - If kb_search reports kb_not_ready, apologize and request_callback.
         INTAKE (Ask one by one): First Name, Company, Email, Location (City/State), Dock Available, Phone.
         VERIFY: Read back Name, Email, Phone (Spell out A-B-C).
         SUBMIT: Use tool "submit_new_intake".
@@ -297,6 +473,74 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
               },
               required: ['caller_name', 'load_number', 'call_notes']
             }
+          },
+          {
+            type: 'function',
+            name: 'kb_search',
+            description: 'Search the company knowledge base for answers.',
+            parameters: {
+              type: 'object',
+              properties: {
+                query: { type: 'string' },
+                top_k: { type: 'number' }
+              },
+              required: ['query']
+            }
+          },
+          {
+            type: 'function',
+            name: 'request_callback',
+            description: 'Log a callback request for dispatch or an agent.',
+            parameters: {
+              type: 'object',
+              properties: {
+                caller_name: { type: 'string' },
+                company_name: { type: 'string' },
+                phone: { type: 'string' },
+                email: { type: 'string' },
+                reason: { type: 'string' },
+                issue_summary: { type: 'string' },
+                preferred_language: { type: 'string' },
+                load_number: { type: 'string' },
+                reservation_number: { type: 'string' }
+              },
+              required: ['reason']
+            }
+          },
+          {
+            type: 'function',
+            name: 'transfer_to_agent',
+            description: 'Transfer to a live agent with a clear introduction.',
+            parameters: {
+              type: 'object',
+              properties: {
+                caller_name: { type: 'string' },
+                company_name: { type: 'string' },
+                phone: { type: 'string' },
+                email: { type: 'string' },
+                issue_summary: { type: 'string' },
+                preferred_language: { type: 'string' },
+                load_number: { type: 'string' },
+                reservation_number: { type: 'string' }
+              },
+              required: ['issue_summary']
+            }
+          },
+          {
+            type: 'function',
+            name: 'log_unknown_question',
+            description: 'Log a question the KB could not answer.',
+            parameters: {
+              type: 'object',
+              properties: {
+                question: { type: 'string' },
+                topic: { type: 'string' },
+                caller_name: { type: 'string' },
+                phone: { type: 'string' },
+                preferred_language: { type: 'string' }
+              },
+              required: ['question']
+            }
           }
         ],
         tool_choice: 'auto'
@@ -321,7 +565,13 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
         openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
       } else if (response.type === 'response.function_call_arguments.done') {
         const functionName = response.name;
-        const args = JSON.parse(response.arguments || '{}');
+        let args = {};
+        try {
+          args = JSON.parse(response.arguments || '{}');
+        } catch {
+          args = {};
+        }
+
         if (functionName === 'submit_new_intake') {
           if (contact.found) {
             args.first_name = args.first_name || contact.firstName;
@@ -334,23 +584,9 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
             ['job_city', 'job_state', 'how_can_we_help_you'],
             log
           );
-          await fetch(WEBHOOK_NEW_ORDER, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(translatedArgs)
-          });
-          openaiWs.send(JSON.stringify({
-            type: 'conversation.item.create',
-            item: {
-              type: 'function_call_output',
-              call_id: response.call_id,
-              output: JSON.stringify({ success: true })
-            }
-          }));
-          openaiWs.send(JSON.stringify({
-            type: 'response.create',
-            response: { instructions: 'Confirm dispatch has been notified.' }
-          }));
+          const webhookResult = await postWebhook(WEBHOOK_NEW_ORDER, translatedArgs, log, 'new_order');
+          sendToolOutput(response.call_id, { success: webhookResult.ok });
+          requestFollowup('Confirm the intake is complete and that a quote will be emailed shortly.');
         } else if (functionName === 'report_existing_issue') {
           const finalLoadNumber = args.load_number || contact.load_number || contact.reservation_number || 'Unknown';
           const payload = { ...args, load_number: finalLoadNumber };
@@ -359,23 +595,79 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
             payload.phone = payload.phone || callerPhone;
           }
           const translatedPayload = await translateFieldsToEnglish(payload, ['call_notes'], log);
-          await fetch(WEBHOOK_EXISTING_UPDATE, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(translatedPayload)
+          const webhookResult = await postWebhook(WEBHOOK_EXISTING_UPDATE, translatedPayload, log, 'existing_update');
+          sendToolOutput(response.call_id, { success: webhookResult.ok });
+          requestFollowup('Say: "I have sent those notes to dispatch. They will call you back shortly with an update."');
+        } else if (functionName === 'kb_search') {
+          const topK = Number.isFinite(Number(args.top_k)) ? Number(args.top_k) : 5;
+          const result = await searchKb(kbIndex, args.query || '', {
+            apiKey: OPENAI_API_KEY,
+            model: kbIndex?.embeddingModel || OPENAI_EMBEDDING_MODEL,
+            topK,
+            log
           });
-          openaiWs.send(JSON.stringify({
-            type: 'conversation.item.create',
-            item: {
-              type: 'function_call_output',
-              call_id: response.call_id,
-              output: JSON.stringify({ success: true })
-            }
-          }));
-          openaiWs.send(JSON.stringify({
-            type: 'response.create',
-            response: { instructions: "Say: 'I have sent those notes to dispatch regarding that load/reservation number. They will call you shortly.'" }
-          }));
+          sendToolOutput(response.call_id, result);
+          requestFollowup();
+        } else if (functionName === 'request_callback') {
+          const payload = {
+            caller_name: args.caller_name || contact.firstName || 'Unknown',
+            company_name: args.company_name || contact.company || '',
+            phone: args.phone || callerPhone,
+            email: args.email || contact.email || '',
+            reason: args.reason || args.issue_summary || 'Callback requested',
+            issue_summary: args.issue_summary || args.reason || '',
+            preferred_language: args.preferred_language || '',
+            load_number: args.load_number || contact.load_number || '',
+            reservation_number: args.reservation_number || contact.reservation_number || '',
+            stream_sid: streamSid,
+            source: 'voice'
+          };
+          const translatedPayload = await translateFieldsToEnglish(payload, ['reason', 'issue_summary'], log);
+          const webhookResult = await postWebhook(WEBHOOK_CALLBACK_REQUEST, translatedPayload, log, 'callback_request');
+          sendToolOutput(response.call_id, { success: webhookResult.ok });
+          requestFollowup('Let the caller know dispatch will call them back with an update. Confirm their best callback number and email.');
+        } else if (functionName === 'transfer_to_agent') {
+          const payload = {
+            caller_name: args.caller_name || contact.firstName || 'Unknown',
+            company_name: args.company_name || contact.company || '',
+            phone: args.phone || callerPhone,
+            email: args.email || contact.email || '',
+            issue_summary: args.issue_summary || '',
+            preferred_language: args.preferred_language || '',
+            load_number: args.load_number || contact.load_number || '',
+            reservation_number: args.reservation_number || contact.reservation_number || '',
+            stream_sid: streamSid,
+            source: 'voice'
+          };
+          const translatedPayload = await translateFieldsToEnglish(payload, ['issue_summary'], log);
+          const introParts = [
+            translatedPayload.caller_name ? `Caller: ${translatedPayload.caller_name}` : null,
+            translatedPayload.company_name ? `Company: ${translatedPayload.company_name}` : null,
+            translatedPayload.phone ? `Phone: ${translatedPayload.phone}` : null,
+            translatedPayload.email ? `Email: ${translatedPayload.email}` : null,
+            translatedPayload.load_number ? `Load/Reservation: ${translatedPayload.load_number}` : translatedPayload.reservation_number ? `Reservation: ${translatedPayload.reservation_number}` : null,
+            translatedPayload.issue_summary ? `Issue: ${translatedPayload.issue_summary}` : null,
+            translatedPayload.preferred_language ? `Language: ${translatedPayload.preferred_language}` : null
+          ].filter(Boolean);
+          translatedPayload.introduction = introParts.join(' | ');
+          const webhookResult = await postWebhook(WEBHOOK_TRANSFER_REQUEST, translatedPayload, log, 'transfer_request');
+          sendToolOutput(response.call_id, { success: webhookResult.ok, introduction: translatedPayload.introduction });
+          requestFollowup('Tell the caller you are transferring them to an agent now and summarize what you are passing along.');
+        } else if (functionName === 'log_unknown_question') {
+          const payload = {
+            question: args.question || '',
+            topic: args.topic || '',
+            caller_name: args.caller_name || contact.firstName || 'Unknown',
+            phone: args.phone || callerPhone,
+            preferred_language: args.preferred_language || ''
+          };
+          const translatedPayload = await translateFieldsToEnglish(payload, ['question', 'topic'], log);
+          await logUnknownQuestion(translatedPayload, log);
+          sendToolOutput(response.call_id, { success: true });
+          requestFollowup();
+        } else {
+          sendToolOutput(response.call_id, { success: false, error: 'Unknown tool' });
+          requestFollowup();
         }
       }
     } catch (err) {
