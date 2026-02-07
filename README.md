@@ -24,17 +24,39 @@ cp .env.example .env
 2) Set env in `.env`
 - OPENAI_API_KEY=...
 - OPENAI_REALTIME_MODEL=...
+- TWILIO_AUTH_TOKEN=...
 
 3) Start
 ```bash
 npm run dev
 ```
 
+## Knowledge base ingestion
+This project can crawl ezlumperservices.com and build a local embedding index for retrieval.
+
+1) Build the KB index (run whenever the site changes):
+```bash
+npm run ingest:kb
+```
+
+2) Optional KB settings (see `.env.example`):
+- KB_INDEX_PATH (default `./data/kb_index.json`)
+- KB_REFRESH_ON_START=true (rebuild on startup)
+- KB_MAX_PAGES, KB_CHUNK_SIZE, KB_CHUNK_OVERLAP
+
+## Callback and transfer webhooks
+Optional endpoints you can wire to your CRM/dispatch system:
+- WEBHOOK_CALLBACK_REQUEST
+- WEBHOOK_TRANSFER_REQUEST
+- WEBHOOK_UNKNOWN_QUESTION (for KB gaps)
+
 ## Twilio setup
 Set your Twilio Voice number webhook:
 - When a call comes in:
   - Method: POST
   - URL: https://YOUR_FLY_APP.fly.dev/twilio/voice
+
+Ensure `PUBLIC_BASE_URL` matches the webhook URL so Twilio signature validation succeeds.
 
 This route returns TwiML instructing Twilio to open a Media Stream WebSocket.
 
