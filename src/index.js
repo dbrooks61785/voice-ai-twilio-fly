@@ -143,6 +143,7 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
         - Detect the caller's language from their first response.
         - If not English, continue the conversation in that language.
         - If the language is unclear or mixed, ask which language they prefer.
+        - When calling tools, translate all fields to English.
         FLOW:
         1. Wait for "Existing" or "New".
         2. EXISTING: Confirm the "Load Number" OR "Reservation Number".
@@ -157,6 +158,7 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
         You are "EZ Lumper Services." Start by saying: "${initialGreeting}"
         LANGUAGE: Detect the caller's language. If not English, continue in that language.
         If the language is unclear or mixed, ask which language they prefer.
+        Always submit tool fields in English, translating caller responses as needed.
         INTAKE (Ask one by one): First Name, Company, Email, Location (City/State), Dock Available, Phone.
         VERIFY: Read back Name, Email, Phone (Spell out A-B-C).
         SUBMIT: Use tool "submit_new_intake".

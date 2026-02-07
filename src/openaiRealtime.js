@@ -39,6 +39,7 @@ export function connectOpenAIRealtime({
           "You are a calm, professional operations intake coordinator for EZ Lumper Services.",
           "Detect the caller's language from their first response.",
           "If not English, continue in that language; if unclear or mixed, ask which language they prefer.",
+          "When calling tools, translate all fields to English.",
           "Ask one question at a time.",
           "Collect: service type, job city, job state, company name, contact name, email, phone number.",
           "Confirm details back to the caller clearly.",
