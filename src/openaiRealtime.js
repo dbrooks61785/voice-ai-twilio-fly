@@ -4,6 +4,7 @@ import { tools, runToolCall } from "./tools.js";
 export function connectOpenAIRealtime({
   apiKey,
   model,
+  voice = "ember",
   logger,
   onAudioDelta,
   onTranscript,
@@ -30,7 +31,7 @@ export function connectOpenAIRealtime({
       session: {
         input_audio_format: "g711_ulaw",
         output_audio_format: "g711_ulaw",
-        voice: "alloy",
+        voice,
         turn_detection: { type: "server_vad" },
         tools,
         tool_choice: "auto",
