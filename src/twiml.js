@@ -1,13 +1,21 @@
-export function twimlConnectStream(wsUrl) {
+export function twimlConnectStream(wsUrl, parameters = {}) {
+  const entries = Object.entries(parameters || {}).filter(([, value]) => value !== undefined && value !== null && value !== "");
+  const hasParams = entries.length > 0;
+  const paramLines = entries.map(([name, value]) => (
+    `      <Parameter name="${escapeXml(name)}" value="${escapeXml(value)}" />`
+  ));
+
   // Twilio expects valid XML TwiML
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<Response>',
     '  <Connect>',
-    '    <Stream url="' + escapeXml(wsUrl) + '" />',
+    hasParams ? `    <Stream url="${escapeXml(wsUrl)}">` : `    <Stream url="${escapeXml(wsUrl)}" />`,
+    ...paramLines,
+    hasParams ? '    </Stream>' : null,
     '  </Connect>',
     '</Response>'
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 function escapeXml(str) {

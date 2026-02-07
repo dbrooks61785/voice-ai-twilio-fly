@@ -3,6 +3,7 @@ import Fastify from 'fastify';
 import formbody from '@fastify/formbody';
 import websocket from '@fastify/websocket';
 import WebSocket from 'ws';
+import { twimlConnectStream } from './twiml.js';
 
 const app = Fastify({
   logger: { level: process.env.LOG_LEVEL || 'info' }
@@ -99,10 +100,10 @@ app.post('/twilio/voice', async (req, reply) => {
     reply.code(403).send('Forbidden');
     return;
   }
-  const base = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.headers.host}`;
+  const base = (process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.headers.host}`).replace(/\/$/, '');
   const wsUrl = `${base.replace('http://', 'ws://').replace('https://', 'wss://')}/twilio-media`;
   const caller = (req.body && req.body.From) || (req.query && req.query.From) || '';
-  const xml = `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${wsUrl}"><Parameter name="caller" value="${caller}"/></Stream></Connect></Response>`;
+  const xml = twimlConnectStream(wsUrl, caller ? { caller } : {});
   reply.type('text/xml').send(xml);
 });
 
