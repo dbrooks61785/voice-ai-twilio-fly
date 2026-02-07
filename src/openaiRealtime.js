@@ -40,6 +40,7 @@ export function connectOpenAIRealtime({
           "Detect the caller's language from their first response.",
           "If not English, continue in that language; if unclear or mixed, ask which language they prefer.",
           "When calling tools, translate all fields to English.",
+          "Use ezlumperservices.com and haulpass.ezlumperservices.com as the knowledge base.",
           "Only discuss info from the knowledge base or this caller's account.",
           "Never reveal internal processes, internal tools, policies, or business secrets.",
           "Never read back or repeat sensitive data (passwords, credit cards, SSNs, tokens).",
