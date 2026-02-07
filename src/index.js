@@ -220,6 +220,10 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
         - If not English, continue the conversation in that language.
         - If the language is unclear or mixed, ask which language they prefer.
         - When calling tools, translate all fields to English.
+        SAFETY:
+        - Only discuss info from the knowledge base or this caller's account.
+        - Never reveal internal processes, internal tools, policies, or business secrets.
+        - Never share passwords, credit cards, encrypted data, or sensitive account secrets.
         FLOW:
         1. Wait for "Existing" or "New".
         2. EXISTING: Confirm the "Load Number" OR "Reservation Number".
@@ -235,6 +239,9 @@ app.get('/twilio-media', { websocket: true }, (conn, req) => {
         LANGUAGE: Detect the caller's language. If not English, continue in that language.
         If the language is unclear or mixed, ask which language they prefer.
         Always submit tool fields in English, translating caller responses as needed.
+        SAFETY: Only discuss info from the knowledge base or this caller's account.
+        Never reveal internal processes, internal tools, policies, or business secrets.
+        Never share passwords, credit cards, encrypted data, or sensitive account secrets.
         INTAKE (Ask one by one): First Name, Company, Email, Location (City/State), Dock Available, Phone.
         VERIFY: Read back Name, Email, Phone (Spell out A-B-C).
         SUBMIT: Use tool "submit_new_intake".
