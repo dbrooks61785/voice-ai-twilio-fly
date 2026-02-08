@@ -11,7 +11,7 @@ app.register(formbody);
 app.register(websocket);
 
 const PORT = Number(process.env.PORT || 8080);
-const VOICE = process.env.VOICE || 'ash';
+const VOICE = process.env.VOICE || 'ember';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime';
 const GHL_PIT_TOKEN = process.env.GHL_PIT_TOKEN || '';
