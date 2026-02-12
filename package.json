@@ -7,13 +7,16 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "ingest:kb": "node src/ingestKb.js"
   },
   "dependencies": {
     "@fastify/formbody": "^8.0.0",
     "@fastify/websocket": "^10.0.0",
+    "cheerio": "^1.2.0",
     "dotenv": "^16.4.5",
     "fastify": "^4.28.1",
+    "twilio": "^5.12.1",
     "ws": "^8.18.0"
   }
 }
